@@ -139,8 +139,17 @@ def init_db():
                 carrier     TEXT    NOT NULL DEFAULT '',
                 last_status TEXT    NOT NULL DEFAULT '',
                 added_at    TEXT    NOT NULL DEFAULT '',
+                note        TEXT    NOT NULL DEFAULT '',
                 PRIMARY KEY (chat_id, code)
             )
+        """)
+        # Migrate: thêm cột note nếu DB cũ chưa có
+        try:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN note TEXT NOT NULL DEFAULT ''")
+            conn.commit()
+        except Exception:
+            pass  # cột đã tồn tại, bỏ qua
+        conn.execute("""SELECT 1
         """)
         conn.commit()
         conn.close()
@@ -171,12 +180,12 @@ def is_delivered(status: str) -> bool:
     s = (status or "").lower().strip()
     return any(kw in s for kw in SUCCESS_KEYWORDS)
 
-def db_add(chat_id: int, code: str, carrier: str, current_status: str = ""):
+def db_add(chat_id: int, code: str, carrier: str, current_status: str = "", note: str = ""):
     added_at = datetime.now().strftime("%d/%m/%Y %H:%M")
     with db() as conn:
         conn.execute(
-            "INSERT OR IGNORE INTO watchlist (chat_id, code, carrier, last_status, added_at) VALUES (?, ?, ?, ?, ?)",
-            (chat_id, code.upper(), carrier, current_status, added_at),
+            "INSERT OR IGNORE INTO watchlist (chat_id, code, carrier, last_status, added_at, note) VALUES (?, ?, ?, ?, ?, ?)",
+            (chat_id, code.upper(), carrier, current_status, added_at, note.strip()),
         )
 
 def db_remove(chat_id: int, code: str):
@@ -188,6 +197,13 @@ def db_update_status(chat_id: int, code: str, new_status: str):
         conn.execute(
             "UPDATE watchlist SET last_status=? WHERE chat_id=? AND code=?",
             (new_status, chat_id, code.upper()),
+        )
+
+def db_update_note(chat_id: int, code: str, note: str):
+    with db() as conn:
+        conn.execute(
+            "UPDATE watchlist SET note=? WHERE chat_id=? AND code=?",
+            (note.strip(), chat_id, code.upper()),
         )
 
 def db_get_all(chat_id: int) -> List[sqlite3.Row]:
@@ -353,11 +369,13 @@ async def auto_check_job(context):
 
                 await asyncio.to_thread(db_update_status, chat_id, code, new_status)
 
+                note_val = info.get("note", "")
+                note_line = f"\n📝 {_e(note_val)}" if note_val else ""
                 msg = (
-                    f"🔔 <b>Cập nhật vận đơn {code}</b>\n"
-                    f"🚚 {tdata.get('carrier', '')}\n"
-                    f"📌 Trạng thái mới: <b>{new_status}</b>\n"
-                    f"↩️ Trước: {old_status or 'chưa rõ'}\n"
+                    f"🔔 <b>Cập nhật vận đơn {_e(code)}</b>{note_line}\n"
+                    f"🚚 {_e(tdata.get('carrier', ''))}\n"
+                    f"📌 Trạng thái mới: <b>{_e(new_status)}</b>\n"
+                    f"↩️ Trước: {_e(old_status or 'chưa rõ')}\n"
                 )
                 if tdata.get("link"):
                     msg += f"\n🔗 {tdata['link']}"
@@ -406,9 +424,10 @@ async def show_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     for r in rows:
         status = r["last_status"] or "Chưa có thông tin"
         delivered_mark = " ✅" if is_delivered(status) else ""
+        note_str = f" — <i>{_e(r['note'])}</i>" if r["note"] else ""
         lines.append(
-            f"🧾 <b>{r['code']}</b> [{r['carrier']}]{delivered_mark}\n"
-            f"   📌 {status}\n"
+            f"🧾 <b>{_e(r['code'])}</b>{note_str} [{r['carrier']}]{delivered_mark}\n"
+            f"   📌 {_e(status)}\n"
             f"   🕐 Thêm lúc: {r['added_at']}"
         )
 
@@ -428,6 +447,25 @@ async def remove_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     await asyncio.to_thread(db_remove, chat_id, code)
     await update.message.reply_text(f"✅ Đã xoá {code} khỏi danh sách theo dõi.")
+
+async def note_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /note <MVĐ> <ghi chú>
+    Ví dụ: /note GYKMUGPK Áo thun xanh
+    """
+    chat_id = update.effective_chat.id
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text(
+            "Cú pháp: /note <MVĐ> <ghi chú>\nVí dụ: /note GYKMUGPK Áo thun xanh"
+        )
+        return
+    code = context.args[0].strip().upper()
+    note = " ".join(context.args[1:]).strip()
+    if not await asyncio.to_thread(db_exists, chat_id, code):
+        await update.message.reply_text(f"❌ Không tìm thấy {code} trong danh sách theo dõi.")
+        return
+    await asyncio.to_thread(db_update_note, chat_id, code, note)
+    await update.message.reply_text(f"✅ Đã cập nhật ghi chú cho {code}: <i>{_e(note)}</i>", parse_mode="HTML")
 
 async def continue_check_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -459,7 +497,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
 
     # --- MVĐ? ---
-    single = raw.replace(" ", "").strip()
+    # Hỗ trợ định dạng: "SPXVN123456 Áo thun xanh"
+    parts = raw.strip().split(None, 1)  # tách tối đa 1 lần
+    single = parts[0].replace(" ", "").strip().upper()
+    input_note = parts[1].strip() if len(parts) > 1 else ""
     carrier = detect_tracking_carrier(single)
     if carrier:
         await update.message.reply_text("⏳ Đang check hành trình vận đơn...")
@@ -483,10 +524,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not is_delivered(current_status):
                 already = await asyncio.to_thread(db_exists, chat_id, single)
                 if not already:
-                    await asyncio.to_thread(db_add, chat_id, single, carrier, current_status)
-                    msg += f"\n\n📌 <i>Đã thêm vào danh sách theo dõi (check mỗi {AUTO_CHECK_INTERVAL}s)</i>"
+                    await asyncio.to_thread(db_add, chat_id, single, carrier, current_status, input_note)
+                    note_display = f" (<i>{_e(input_note)}</i>)" if input_note else ""
+                    msg += f"\n\n📌 <i>Đã thêm vào danh sách theo dõi{note_display} (check mỗi {AUTO_CHECK_INTERVAL}s)</i>"
                 else:
-                    msg += "\n\n🔄 <i>MVĐ này đang được theo dõi rồi.</i>"
+                    # Cập nhật note nếu user gửi lại với note mới
+                    if input_note:
+                        await asyncio.to_thread(db_update_note, chat_id, single, input_note)
+                        msg += f"\n\n✏️ <i>Đã cập nhật ghi chú: {_e(input_note)}</i>"
+                    else:
+                        msg += "\n\n🔄 <i>MVĐ này đang được theo dõi rồi.</i>"
             else:
                 msg += "\n\n✅ <i>Đơn đã giao thành công, không thêm vào theo dõi.</i>"
 
@@ -556,6 +603,7 @@ def main():
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("remove", remove_cmd))
+    app.add_handler(CommandHandler("note", note_cmd))
     app.add_handler(CallbackQueryHandler(continue_check_callback, pattern=f"^{CB_CONTINUE}$"))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
