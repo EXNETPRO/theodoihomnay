@@ -259,28 +259,33 @@ def count_real_orders_from_api(data: Dict[str, Any]) -> int:
 # =======================
 # Tracking formatter
 # =======================
+def _e(s: Any) -> str:
+    """Escape HTML entities để gửi an toàn với parse_mode=HTML."""
+    import html as _html
+    return _html.escape(str(s) if s is not None else "")
+
 def format_tracking_for_telegram(tdata: Dict[str, Any], max_events: int = 5) -> str:
     lines: List[str] = []
     if tdata.get("carrier"):
-        lines.append(f"🚚 Đơn vị: {tdata['carrier']}")
+        lines.append(f"🚚 Đơn vị: {_e(tdata['carrier'])}")
     if tdata.get("code"):
-        lines.append(f"🧾 MVĐ: {tdata['code']}")
+        lines.append(f"🧾 MVĐ: {_e(tdata['code'])}")
     if tdata.get("current_status"):
-        lines.append(f"📌 Trạng thái: {tdata['current_status']}")
+        lines.append(f"📌 Trạng thái: {_e(tdata['current_status'])}")
     if tdata.get("from_address") and tdata.get("to_address"):
-        lines.append(f"📦 Tuyến: {tdata['from_address']} ➜ {tdata['to_address']}")
+        lines.append(f"📦 Tuyến: {_e(tdata['from_address'])} ➜ {_e(tdata['to_address'])}")
     if tdata.get("to_name"):
-        lines.append(f"👤 Người nhận: {tdata['to_name']}")
+        lines.append(f"👤 Người nhận: {_e(tdata['to_name'])}")
     if tdata.get("raw_sls_tn"):
-        lines.append(f"🔎 Mã liên kết: {tdata['raw_sls_tn']}")
+        lines.append(f"🔎 Mã liên kết: {_e(tdata['raw_sls_tn'])}")
 
     evs = tdata.get("events") or []
     if evs:
         lines.append("\n📍 Hành trình gần nhất (mới nhất ở trên):")
         for e in evs[:max_events]:
-            t = (e.get("time") or "").strip()
-            st = (e.get("status") or "").strip()
-            de = (e.get("detail") or "").strip()
+            t = _e(e.get("time") or "")
+            st = _e(e.get("status") or "")
+            de = _e(e.get("detail") or "")
             one = " - ".join([x for x in [t, st, de] if x])
             if one:
                 lines.append(f"• {one}")
@@ -289,7 +294,7 @@ def format_tracking_for_telegram(tdata: Dict[str, Any], max_events: int = 5) -> 
             lines.append(f"… +{remain} dòng khác (Mở link để xem full hành trình)")
 
     if tdata.get("link"):
-        lines.append(f"\n🔗 {tdata['link']}")
+        lines.append(f"\n🔗 {_e(tdata['link'])}")
 
     return "\n".join(lines).strip()
 
